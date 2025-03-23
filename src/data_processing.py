@@ -125,5 +125,3 @@ def load_combine_datasets():
     combined_df = combined_df[combined_df["STATE_ABBR"] != "XX"]
 
     return combined_df
-
-combined_df = load_combine_datasets()

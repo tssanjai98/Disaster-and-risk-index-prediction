@@ -1,127 +1,107 @@
-import pandas as pd
 import os
+import pandas as pd
 
-EVENT_TYPE_MAPPING = {
-    "ice storm": "severe ice storm",
-    "flood": "flood",
-    "tornado": "tornado",
-    "drought": "drought",
-    "thunderstorm wind": "severe storm",
-    "winter storm": "winter storm",
-    "debris flow": "mud/landslide",
-    "wildfire": "fire",
-    "hurricane (typhoon)": "hurricane",
-    "tropical storm": "tropical storm",
-    "strong wind": "severe storm",
-    "storm surge/tide": "coastal storm",
-    "frost/freeze": "freezing",
-    "volcanic ash": "volcanic eruption",
-    "tsunami": "tsunami"
-}
+def load_and_merge_disaster_data(data_folder="../data/noaa_disaster_data", fema_data_path="../data/DisasterDeclarationsSummaries.csv"):
+    us_state_to_abbrev = {
+        'ALABAMA': 'AL', 'ALASKA': 'AK', 'ARIZONA': 'AZ', 'ARKANSAS': 'AR', 'CALIFORNIA': 'CA',
+        'COLORADO': 'CO', 'CONNECTICUT': 'CT', 'DELAWARE': 'DE', 'FLORIDA': 'FL', 'GEORGIA': 'GA',
+        'HAWAII': 'HI', 'IDAHO': 'ID', 'ILLINOIS': 'IL', 'INDIANA': 'IN', 'IOWA': 'IA', 'KANSAS': 'KS',
+        'KENTUCKY': 'KY', 'LOUISIANA': 'LA', 'MAINE': 'ME', 'MARYLAND': 'MD', 'MASSACHUSETTS': 'MA',
+        'MICHIGAN': 'MI', 'MINNESOTA': 'MN', 'MISSISSIPPI': 'MS', 'MISSOURI': 'MO', 'MONTANA': 'MT',
+        'NEBRASKA': 'NE', 'NEVADA': 'NV', 'NEW HAMPSHIRE': 'NH', 'NEW JERSEY': 'NJ', 'NEW MEXICO': 'NM',
+        'NEW YORK': 'NY', 'NORTH CAROLINA': 'NC', 'NORTH DAKOTA': 'ND', 'OHIO': 'OH', 'OKLAHOMA': 'OK',
+        'OREGON': 'OR', 'PENNSYLVANIA': 'PA', 'RHODE ISLAND': 'RI', 'SOUTH CAROLINA': 'SC', 'SOUTH DAKOTA': 'SD',
+        'TENNESSEE': 'TN', 'TEXAS': 'TX', 'UTAH': 'UT', 'VERMONT': 'VT', 'VIRGINIA': 'VA', 'WASHINGTON': 'WA',
+        'WEST VIRGINIA': 'WV', 'WISCONSIN': 'WI', 'WYOMING': 'WY'
+    }
 
-def load_noaa_datasets(data_dir="../data/noaa_disaster_data"):
-    """
-    Reads all NOAA disaster datasets from the given directory and returns a combined dataframe.
-    Filters datasets that contain 'event_id' and 'event_type' columns.
-    Ensures 'event_id' is numeric and removes invalid entries.
-    """
-    event_rows = []
+    csv_files = [f for f in os.listdir(data_folder) if f.endswith(".csv")]
+    df_list = []
 
-    for file in os.listdir(data_dir):
-        if file.endswith(".csv"):
-            file_path = os.path.join(data_dir, file)
-            try:
-                df = pd.read_csv(file_path, on_bad_lines='skip', low_memory=False)
-                df.columns = df.columns.str.strip().str.lower()  # Normalize column names
-            except Exception as e:
-                continue
+    for file in sorted(csv_files):  
+        file_path = os.path.join(data_folder, file)
+        df = pd.read_csv(file_path, low_memory=False)  
+        df_list.append(df)
 
-            if 'event_id' in df.columns and 'event_type' in df.columns:
-                df['event_id'] = pd.to_numeric(df['event_id'], errors='coerce')
-                df = df.dropna(subset=['event_id'])
-                df['event_id'] = df['event_id'].astype(int)
+    merged_df = pd.concat(df_list, ignore_index=True)
+    merged_df = merged_df[["STATE", "STATE_FIPS", "YEAR", "EVENT_TYPE", "CZ_FIPS", "CZ_NAME", "BEGIN_DATE_TIME"]]
 
-                event_rows.append(df)
-    
-    if event_rows:
-        event_data = pd.concat(event_rows, ignore_index=True)
-        return event_data
-    else:
-        return pd.DataFrame()
+    merged_df["STATE"] = merged_df["STATE"].str.upper().map(us_state_to_abbrev)
 
-def convert_time_column(time_col):
-    """Convert NOAA time from integer format (e.g., 1922) to HH:MM format."""
-    time_col = pd.to_numeric(time_col, errors="coerce")
-    return time_col.apply(lambda x: f"{int(x // 100):02}:{int(x % 100):02}" if pd.notna(x) else None)
+    merged_df["STATE_FIPS"] = pd.to_numeric(merged_df["STATE_FIPS"], errors="coerce").astype("Int64")
 
-def fill_missing_end_date(row, median_durations):
-    """Fill missing end dates based on median duration per state and event type."""
-    if pd.isna(row["END_DATE"]):
-        median_duration = median_durations.get((row["STATE_ABBR"], row["EVENT_TYPE"]), 1)
-        median_duration = 1 if pd.isna(median_duration) else int(median_duration)
-        return row["BEGIN_DATE"] + pd.Timedelta(days=median_duration)
-    return row["END_DATE"]
+    merged_df["BEGIN_DATE_TIME"] = pd.to_datetime(
+        merged_df["BEGIN_DATE_TIME"], format="%d-%b-%y %H:%M:%S", errors="coerce"
+    )
 
-def load_combine_datasets():
-    noaa_dir = "../data/noaa_disaster_data"
-    fema_file = "../data/DisasterDeclarationsSummaries.csv"
+    merged_df["BEGIN_DATE_TIME"] = merged_df.apply(
+        lambda row: row["BEGIN_DATE_TIME"].replace(year=row["YEAR"]) if pd.notnull(row["BEGIN_DATE_TIME"]) else None, axis=1
+    )
 
-    # Load FEMA dataset
-    fema_df = pd.read_csv(fema_file, low_memory=False)
-    fema_df = fema_df[["state", "incidentBeginDate", "incidentEndDate", "incidentType"]]
+    merged_df["BEGIN_DATE_TIME"] = merged_df["BEGIN_DATE_TIME"].dt.date
+
+    merged_df = merged_df.dropna(subset=["STATE"])
+    merged_df = merged_df[merged_df["CZ_FIPS"] != 0]
+    merged_df = merged_df.drop_duplicates()
+
+
+    fema_df = pd.read_csv(fema_data_path, low_memory=False)
+    fema_df = fema_df[["state", "fipsStateCode", "fyDeclared", "incidentType", "fipsCountyCode", "designatedArea", "incidentBeginDate"]]
+
+    fema_df["fipsStateCode"] = pd.to_numeric(fema_df["fipsStateCode"], errors="coerce").astype("Int64")
+    fema_df = fema_df[fema_df["fipsCountyCode"] != 0]
+    fema_df["incidentBeginDate"] = pd.to_datetime(fema_df["incidentBeginDate"]).dt.date
+
+    event_mapping = {
+        "Thunderstorm Wind": "Severe Storm",
+        "Hail": "Severe Storm",
+        "Winter Storm": "Winter Storm",
+        "High Wind": "Severe Storm",
+        "Drought": "Drought",
+        "Flash Flood": "Flood",
+        "Heavy Snow": "Snowstorm",
+        "Tornado": "Tornado",
+        "Flood": "Flood",
+        "Heat": "Excessive Heat",
+        "Strong Wind": "Severe Storm",
+        "Excessive Heat": "Excessive Heat",
+        "Blizzard": "Winter Storm",
+        "Lightning": "Severe Storm",
+        "Extreme Cold/Wind Chill": "Freezing",
+        "Frost/Freeze": "Freezing",
+        "Ice Storm": "Severe Ice Storm",
+        "Wildfire": "Fire",
+        "Tropical Storm": "Tropical Storm",
+        "Coastal Flood": "Coastal Storm",
+        "Debris Flow": "Mud/Landslide",
+        "Hurricane (Typhoon)": "Hurricane",
+        "Dust Storm": "Other",
+        "Storm Surge/Tide": "Coastal Storm",
+        "Avalanche": "Snowstorm",
+        "Tsunami": "Tsunami",
+        "Volcanic Ashfall": "Volcanic Eruption"
+    }
+
+    merged_df = merged_df[merged_df["EVENT_TYPE"].isin(event_mapping.keys())]
+    merged_df["EVENT_TYPE"] = merged_df["EVENT_TYPE"].map(event_mapping)
+
     fema_df.rename(columns={
-        "state": "STATE_ABBR",
-        "incidentBeginDate": "BEGIN_DATE",
-        "incidentEndDate": "END_DATE",
-        "incidentType": "EVENT_TYPE"
+        "state": "STATE",
+        "fipsStateCode": "STATE_FIPS",
+        "fyDeclared": "YEAR",
+        "incidentType": "EVENT_TYPE",
+        "fipsCountyCode": "CZ_FIPS",
+        "designatedArea": "CZ_NAME",
+        "incidentBeginDate": "BEGIN_DATE_TIME"
     }, inplace=True)
 
-    fema_df["BEGIN_DATE"] = pd.to_datetime(fema_df["BEGIN_DATE"], errors="coerce").dt.tz_localize(None)
-    fema_df["END_DATE"] = pd.to_datetime(fema_df["END_DATE"], errors="coerce").dt.tz_localize(None)
+    final_df = pd.concat([merged_df, fema_df], ignore_index=True)
 
-    fema_df["DURATION"] = (fema_df["END_DATE"] - fema_df["BEGIN_DATE"]).dt.days
-    median_durations = fema_df.groupby(["STATE_ABBR", "EVENT_TYPE"])["DURATION"].median()
+    final_df = final_df.sort_values(by="CZ_NAME").drop_duplicates(
+        subset=["STATE", "STATE_FIPS", "YEAR", "EVENT_TYPE", "CZ_FIPS", "BEGIN_DATE_TIME"], keep="first"
+    )
 
-    fema_df["END_DATE"] = fema_df.apply(lambda row: fill_missing_end_date(row, median_durations), axis=1)
-    fema_df.drop(columns=["DURATION"], inplace=True)
+    final_df.reset_index(drop=True, inplace=True)
 
-    fema_df["BEGIN_TIME"] = None
-    fema_df["END_TIME"] = None
+    return final_df
 
-    fema_df["STATE_ABBR"] = fema_df["STATE_ABBR"].str.strip().str.upper()
-    fema_df["EVENT_TYPE"] = fema_df["EVENT_TYPE"].str.strip().str.lower()
-
-    noaa_df = load_noaa_datasets(noaa_dir)
-
-    if not noaa_df.empty:
-        relevant_columns = ["state_abbr", "begin_date", "begin_time", "end_date", "end_time", "event_type"]
-        available_columns = [col for col in relevant_columns if col in noaa_df.columns]
-        noaa_df = noaa_df[available_columns]
-
-        column_mapping = {
-            "state_abbr": "STATE_ABBR",
-            "begin_date": "BEGIN_DATE",
-            "begin_time": "BEGIN_TIME",
-            "end_date": "END_DATE",
-            "end_time": "END_TIME",
-            "event_type": "EVENT_TYPE"
-        }
-        noaa_df.rename(columns=column_mapping, inplace=True)
-
-        noaa_df["BEGIN_DATE"] = pd.to_datetime(noaa_df["BEGIN_DATE"], errors="coerce").dt.tz_localize(None)
-        noaa_df["END_DATE"] = pd.to_datetime(noaa_df["END_DATE"], errors="coerce").dt.tz_localize(None)
-
-        noaa_df["STATE_ABBR"] = noaa_df["STATE_ABBR"].str.strip().str.upper()
-        noaa_df["EVENT_TYPE"] = noaa_df["EVENT_TYPE"].str.strip().str.lower()
-
-        noaa_df["BEGIN_TIME"] = convert_time_column(noaa_df["BEGIN_TIME"]) if "BEGIN_TIME" in noaa_df else None
-        noaa_df["END_TIME"] = convert_time_column(noaa_df["END_TIME"]) if "END_TIME" in noaa_df else None
-
-        noaa_df["EVENT_TYPE"] = noaa_df["EVENT_TYPE"].map(EVENT_TYPE_MAPPING).fillna(noaa_df["EVENT_TYPE"])
-
-    combined_df = pd.concat([noaa_df, fema_df], ignore_index=True)
-
-    combined_df.drop_duplicates(inplace=True)
-    combined_df = combined_df[combined_df["STATE_ABBR"] != "XX"]
-
-    return combined_df
